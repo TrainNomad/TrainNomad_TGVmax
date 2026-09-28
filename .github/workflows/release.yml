@@ -1,4 +1,4 @@
-name: Update TGVmax Data
+name: Create Release with Data
 
 on:
   schedule:
@@ -12,7 +12,7 @@ on:
         default: 'true'
 
 jobs:
-  update-data:
+  create-release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -32,21 +32,21 @@ jobs:
         run: |
           mkdir -p data
           go run ./cmd -output data/data.bin.gz
-        working-directory: tgvmax
+        working-directory: Backend/tgvmax
         env:
           GOPROXY: direct
 
       - name: Check file size
         run: |
-          ls -lh tgvmax/data/data.bin.gz
-          du -sh tgvmax/data/data.bin.gz
+          ls -lh Backend/tgvmax/data/data.bin.gz
+          du -sh Backend/tgvmax/data/data.bin.gz
 
       - name: Create or update release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: latest-tgvmax
           name: TGVmax Data (Latest)
-          files: tgvmax/data/data.bin.gz
+          files: Backend/tgvmax/data/data.bin.gz
           draft: false
           prerelease: false
           body: |
@@ -58,7 +58,7 @@ jobs:
 
             ## Usage
             1. Télécharger `data.bin.gz` depuis cette release
-            2. Placer dans le répertoire `tgvmax/data/`
+            2. Placer dans le répertoire `Backend/tgvmax/data/`
             3. Redémarrer le service ou appeler `POST /api/tgvmax/reload`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -83,20 +83,8 @@ jobs:
 
           echo "✓ Reload triggered"
 
-      - name: Notify on failure
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: '❌ TGVmax data update failed. Check workflow logs.'
-            })
-
-  verify-data:
-    needs: update-data
+  verify-release:
+    needs: create-release
     runs-on: ubuntu-latest
 
     steps:
@@ -106,13 +94,13 @@ jobs:
           repo: ${{ github.repository }}
           version: latest-tgvmax
           file: data.bin.gz
-          target: tgvmax/data/downloaded-data.bin.gz
+          target: data.bin.gz
 
       - name: Verify file integrity
         run: |
-          if [ -f tgvmax/data/downloaded-data.bin.gz ]; then
-            ls -lh tgvmax/data/downloaded-data.bin.gz
-            file tgvmax/data/downloaded-data.bin.gz
+          if [ -f data.bin.gz ]; then
+            ls -lh data.bin.gz
+            file data.bin.gz
             echo "✓ File verified"
           else
             echo "❌ File not found"
