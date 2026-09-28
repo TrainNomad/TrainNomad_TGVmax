@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - "Backend/tgvmax/**"
-      - ".github/workflows/deploy-render.yml"
+      - "Backend/tgvmax/.github/workflows/deploy-render.yml"
 
 jobs:
   deploy:

@@ -1,4 +1,4 @@
-name: Create Release with Data
+name: Create TGVmax Release
 
 on:
   schedule:
