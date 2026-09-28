@@ -1,0 +1,39 @@
+# Binaries
+tgvmax-api
+*.exe
+*.exe~
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Test binaries
+*.test
+*.out
+
+# Vendor
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data files (optionnel - à adapter selon stratégie)
+data.bin.gz
+data.bin
+*.db
+
+# Go modules
+go.sum
+
+# Logs
+*.log
+
+# OS
+.env
+.env.local
+.env.*.local

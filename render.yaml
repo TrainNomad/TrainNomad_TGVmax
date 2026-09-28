@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: tgvmax-api
+    runtime: go
+    buildCommand: |
+      cd tgvmax && \
+      go run ./cmd -output data.bin.gz && \
+      go build -o tgvmax-api .
+    startCommand: cd tgvmax && ./tgvmax-api
+    envVars:
+      - key: PORT
+        scope: runtime
+        value: 8000
+      - key: RELOAD_SECRET
+        scope: runtime
+        fromDatabase:
+          name: app_db
+          property: tgvmax_reload_secret
+    healthCheckPath: /health
+    healthCheckInterval: 30
+    disk:
+      size: 1
+    plan: free
+    headers:
+      - path: /api/*
+        name: Content-Type
+        value: application/json
+      - path: /health
+        name: Cache-Control
+        value: no-cache
+
+# Paramètres optionnels pour Render
+# memoryLimit: 512
+# cpuAllocation: 1
+# autoDeploy: true (branch watching)
