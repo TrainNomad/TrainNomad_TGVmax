@@ -145,7 +145,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, r, http.StatusOK, map[string]any{
-		"name":      "TrainNomad routing API",
+		"name":      "TrainNomad TGVmax API",
+		"about":     "Trajets en train avec des places TGVmax disponibles (données SNCF Open Data, mises à jour chaque jour)",
 		"endpoints": []string{"/health", "/stations?q=", "/search?from=&to=&date=&time=", "/explorer?from=&date="},
 	})
 }

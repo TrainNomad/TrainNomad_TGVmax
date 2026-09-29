@@ -1,39 +1,9 @@
-# Binaries
-tgvmax-api
+# Seul le réseau compressé est versionné (Render le déploie à chaque push)
+!network.bin.gz
+network.bin
+*.part
+cache/
+tgvmax_gtfs.zip
+__pycache__/
 *.exe
-*.exe~
-*.dll
-*.so
-*.so.*
-*.dylib
-
-# Test binaries
 *.test
-*.out
-
-# Vendor
-vendor/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Data files (optionnel - à adapter selon stratégie)
-data.bin.gz
-data.bin
-*.db
-
-# Go modules
-go.sum
-
-# Logs
-*.log
-
-# OS
-.env
-.env.local
-.env.*.local

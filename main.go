@@ -14,13 +14,12 @@ func findNetwork() string {
 	if p := os.Getenv("NETWORK_PATH"); p != "" {
 		return p
 	}
-	// Cherche data.bin.gz (genere par sncf_to_gtfs.py)
-	for _, p := range []string{"gtfs_output/network.bin.gz", "data.bin.gz", "network.bin.gz", "../gtfs/network.bin.gz"} {
+	for _, p := range []string{"network.bin.gz", "network.bin", "../gtfs/network.bin.gz"} {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 	}
-	return "gtfs_output/network.bin.gz"
+	return "network.bin.gz"
 }
 
 func main() {
@@ -40,7 +39,7 @@ func main() {
 
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	log.Printf("réseau %s chargé en %d ms : %d gares, %d routes, %d trajets, horaires du %s au %s, heap %.1f Mo",
+	log.Printf("réseau TGVmax %s chargé en %d ms : %d gares, %d routes, %d trajets, horaires du %s au %s, heap %.1f Mo",
 		path, loadMs, net.NumStops(), net.NumRoutes(), len(net.TripDays),
 		net.FirstDate().Format("2006-01-02"), net.LastDate().Format("2006-01-02"), float64(m.HeapAlloc)/1e6)
 
