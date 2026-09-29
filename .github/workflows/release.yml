@@ -1,21 +1,22 @@
-name: Create TGVmax Release
+name: TGVmax Data Release
 
 on:
   schedule:
-    # Chaque jour à 3h UTC
     - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       reload:
-        description: 'Recharger les données sur Render après la mise à jour'
+        description: 'Reload data on Render after release'
         required: false
         default: 'true'
 
+permissions:
+  contents: write
+
 jobs:
-  create-release:
+  build-release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    name: Build and Release TGVmax Data
 
     steps:
       - name: Checkout code
@@ -28,64 +29,121 @@ jobs:
         with:
           go-version: '1.23'
 
-      - name: Download TGVmax data from SNCF
+      - name: Generate TGVmax data
         run: |
-          mkdir -p data
+          mkdir -p tgvmax/data
+          cd tgvmax
           go run ./cmd -output data/data.bin.gz
-        working-directory: Backend/tgvmax
         env:
           GOPROXY: direct
+        timeout-minutes: 10
 
-      - name: Check file size
+      - name: Validate data file
         run: |
-          ls -lh Backend/tgvmax/data/data.bin.gz
-          du -sh Backend/tgvmax/data/data.bin.gz
+          FILE="tgvmax/data/data.bin.gz"
+          if [ ! -f "$FILE" ]; then
+            echo "❌ Error: File not found"
+            exit 1
+          fi
 
-      - name: Create or update release
+          SIZE=$(stat -f%z "$FILE" 2>/dev/null || stat -c%s "$FILE" 2>/dev/null)
+          SIZE_MB=$(echo "scale=2; $SIZE / 1048576" | bc)
+
+          echo "File size: ${SIZE_MB} MB"
+
+          if [ "$SIZE" -lt 1000000 ]; then
+            echo "❌ Error: File too small (< 1 MB)"
+            exit 1
+          fi
+
+          if [ "$SIZE" -gt 200000000 ]; then
+            echo "❌ Error: File too large (> 200 MB)"
+            exit 1
+          fi
+
+          file "$FILE"
+          echo "✓ Data file validated"
+
+      - name: Calculate checksum
+        id: checksum
+        run: |
+          FILE="tgvmax/data/data.bin.gz"
+          CHECKSUM=$(sha256sum "$FILE" | cut -d' ' -f1)
+          echo "sha256=$CHECKSUM" >> $GITHUB_OUTPUT
+          echo "Checksum: $CHECKSUM"
+
+      - name: Create release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: latest-tgvmax
           name: TGVmax Data (Latest)
-          files: Backend/tgvmax/data/data.bin.gz
+          files: tgvmax/data/data.bin.gz
           draft: false
           prerelease: false
           body: |
             # TGVmax Data Update
 
-            **Generated**: ${{ github.event.head_commit.timestamp || github.run_id }}
+            **Build Time**: ${{ github.event.head_commit.timestamp || github.run_id }}
+            **Version**: 2.0
+            **Checksum (SHA256)**: `${{ steps.checksum.outputs.sha256 }}`
 
             Données TGVmax compilées pour chargement rapide en RAM.
 
+            ## Download
+            - **File**: `data.bin.gz`
+            - **Format**: Binary gzip (TGVDATA001)
+            - **Size**: See asset details
+
             ## Usage
-            1. Télécharger `data.bin.gz` depuis cette release
-            2. Placer dans le répertoire `Backend/tgvmax/data/`
-            3. Redémarrer le service ou appeler `POST /api/tgvmax/reload`
+            1. Download `data.bin.gz` from this release
+            2. Place in `Backend/tgvmax/data/`
+            3. Restart service or call `POST /api/tgvmax/reload`
+
+            ## Testing
+            ```bash
+            curl https://your-api.onrender.com/health
+            ```
+
+            See [README.md](https://github.com/${{ github.repository }}/blob/main/Backend/tgvmax/README.md) for details.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Reload data on Render
-        if: github.event.inputs.reload == 'true' || github.event_name == 'schedule'
+        if: ${{ github.event.inputs.reload == 'true' || github.event_name == 'schedule' }}
+        continue-on-error: true
         run: |
-          set -e
           RENDER_URL="${{ secrets.RENDER_TGVMAX_URL }}"
           RELOAD_SECRET="${{ secrets.RELOAD_SECRET }}"
 
           if [ -z "$RENDER_URL" ]; then
-            echo "⚠️  RENDER_TGVMAX_URL not set, skipping reload"
+            echo "⚠️  RENDER_TGVMAX_URL not configured, skipping reload"
             exit 0
           fi
 
-          echo "Reloading data on $RENDER_URL"
-          curl -X POST \
+          echo "Triggering reload on $RENDER_URL"
+
+          RESPONSE=$(curl -w "\n%{http_code}" -X POST \
             -H "X-Reload-Secret: $RELOAD_SECRET" \
             -H "Content-Type: application/json" \
-            "$RENDER_URL/api/tgvmax/reload"
+            "$RENDER_URL/api/tgvmax/reload" 2>&1)
 
-          echo "✓ Reload triggered"
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+
+          echo "HTTP $HTTP_CODE"
+          echo "$BODY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ Reload failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          echo "✓ Reload triggered successfully"
 
   verify-release:
-    needs: create-release
+    needs: build-release
     runs-on: ubuntu-latest
+    name: Verify Released Data
 
     steps:
       - name: Download release asset
@@ -95,14 +153,22 @@ jobs:
           version: latest-tgvmax
           file: data.bin.gz
           target: data.bin.gz
+        continue-on-error: true
 
-      - name: Verify file integrity
+      - name: Verify file
         run: |
-          if [ -f data.bin.gz ]; then
-            ls -lh data.bin.gz
-            file data.bin.gz
-            echo "✓ File verified"
-          else
-            echo "❌ File not found"
+          FILE="data.bin.gz"
+
+          if [ ! -f "$FILE" ]; then
+            echo "❌ File not found after download"
             exit 1
           fi
+
+          SIZE=$(stat -f%z "$FILE" 2>/dev/null || stat -c%s "$FILE" 2>/dev/null)
+          echo "✓ File size: $SIZE bytes"
+
+          HEADER=$(gunzip -c "$FILE" | head -c 10 | od -An -tx1)
+          echo "  Header: $HEADER"
+
+          file "$FILE"
+          echo "✓ File verified"

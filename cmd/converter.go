@@ -1,15 +1,19 @@
 package main
 
 import (
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	// Import the package content from the parent directory
+	"encoding/json"
+	"io"
+	"net/http"
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log"
-	"net/http"
-	"os"
 	"time"
 )
 
@@ -19,25 +23,75 @@ const (
 	dataVersion   = 1
 )
 
-// RawTGVData représente la structure brute du JSON de la SNCF
 type RawTGVData struct {
 	Results []map[string]interface{} `json:"results"`
 }
 
-// DataPackage encapsule toutes les données optimisées pour TGVmax
 type DataPackage struct {
 	Version    int
 	Timestamp  int64
 	Trains     []TrainData
 	Stations   []StationRef
-	StationMap map[string]int // id -> index dans Stations
+	StationMap map[string]int
 }
 
-// DownloadAndConvertData télécharge les données JSON de la SNCF et les convertit en binaire compressé
-func DownloadAndConvertData(outputPath string) error {
-	log.Printf("Téléchargement des données TGVmax depuis %s", dataSourceURL)
+type TrainData struct {
+	ID            string
+	TrainNumber   string
+	Departure     string
+	Arrival       string
+	DepartureTime string
+	ArrivalTime   string
+	Origin        StationRef
+	Destination   StationRef
+	AvailableSeats int
+	TotalSeats    int
+	OperatingDay  string
+	Stops         []StopInfo
+}
 
-	resp, err := http.Get(dataSourceURL)
+type StationRef struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Code      string  `json:"code"`
+	City      string  `json:"city"`
+	Country   string  `json:"country"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+}
+
+type StopInfo struct {
+	Station   StationRef
+	Arrival   string
+	Departure string
+}
+
+func main() {
+	outputFlag := flag.String("output", "data.bin.gz", "Chemin du fichier de sortie")
+	urlFlag := flag.String("url", dataSourceURL, "URL du JSON source")
+	flag.Parse()
+
+	log.Printf("TGVmax Data Converter v2.0")
+	log.Printf("Source: %s", *urlFlag)
+	log.Printf("Output: %s", *outputFlag)
+
+	if dir := filepath.Dir(*outputFlag); dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Fatalf("Erreur création répertoire : %v", err)
+		}
+	}
+
+	if err := downloadAndConvertData(*urlFlag, *outputFlag); err != nil {
+		log.Fatalf("❌ Erreur : %v", err)
+	}
+
+	log.Printf("✓ Conversion réussie")
+}
+
+func downloadAndConvertData(sourceURL, outputPath string) error {
+	log.Printf("Téléchargement des données depuis %s", sourceURL)
+
+	resp, err := http.Get(sourceURL)
 	if err != nil {
 		return fmt.Errorf("erreur de téléchargement : %w", err)
 	}
@@ -72,7 +126,6 @@ func DownloadAndConvertData(outputPath string) error {
 	return nil
 }
 
-// parseAndFilterData parse le JSON et filtre les champs pertinents
 func parseAndFilterData(jsonData []byte) (*DataPackage, error) {
 	var raw RawTGVData
 	if err := json.Unmarshal(jsonData, &raw); err != nil {
@@ -91,18 +144,15 @@ func parseAndFilterData(jsonData []byte) (*DataPackage, error) {
 	for _, item := range raw.Results {
 		train, err := extractTrain(item)
 		if err != nil {
-			log.Printf("⚠ Erreur extraction train : %v", err)
 			continue
 		}
 
-		// Déduplication
 		trainKey := fmt.Sprintf("%s:%s:%s", train.TrainNumber, train.Departure, train.Arrival)
 		if trainMap[trainKey] {
 			continue
 		}
 		trainMap[trainKey] = true
 
-		// Extraction des stations
 		if train.Origin.ID != "" {
 			stations[train.Origin.ID] = train.Origin
 		}
@@ -119,7 +169,6 @@ func parseAndFilterData(jsonData []byte) (*DataPackage, error) {
 		pkg.Trains = append(pkg.Trains, train)
 	}
 
-	// Construction de l'index des stations
 	for id, station := range stations {
 		pkg.StationMap[id] = len(pkg.Stations)
 		pkg.Stations = append(pkg.Stations, station)
@@ -128,11 +177,9 @@ func parseAndFilterData(jsonData []byte) (*DataPackage, error) {
 	return pkg, nil
 }
 
-// extractTrain extrait les données pertinentes d'un élément JSON
 func extractTrain(item map[string]interface{}) (TrainData, error) {
 	train := TrainData{}
 
-	// Champs simples (strings)
 	if v, ok := item["id"].(string); ok {
 		train.ID = v
 	} else if v, ok := item["Id"].(string); ok {
@@ -165,7 +212,6 @@ func extractTrain(item map[string]interface{}) (TrainData, error) {
 		train.ArrivalTime = v
 	}
 
-	// Nombres entiers
 	if v, ok := item["available_seats"].(float64); ok {
 		train.AvailableSeats = int(v)
 	}
@@ -178,7 +224,6 @@ func extractTrain(item map[string]interface{}) (TrainData, error) {
 		train.OperatingDay = v
 	}
 
-	// Stations (géo)
 	train.Origin = extractStation(item, "origin")
 	train.Destination = extractStation(item, "destination")
 
@@ -189,7 +234,6 @@ func extractTrain(item map[string]interface{}) (TrainData, error) {
 	return train, nil
 }
 
-// extractStation extrait une station d'un objet JSON imbriqué
 func extractStation(item map[string]interface{}, prefix string) StationRef {
 	station := StationRef{}
 
@@ -220,16 +264,13 @@ func extractStation(item map[string]interface{}, prefix string) StationRef {
 	return station
 }
 
-// encodeToGzip encode les données en binaire gzippé
 func encodeToGzip(pkg *DataPackage) ([]byte, error) {
 	var buf bytes.Buffer
 
-	// Header
 	buf.WriteString(dataMagic)
 	binary.Write(&buf, binary.LittleEndian, int32(dataVersion))
 	binary.Write(&buf, binary.LittleEndian, pkg.Timestamp)
 
-	// Trains
 	binary.Write(&buf, binary.LittleEndian, int32(len(pkg.Trains)))
 	for _, train := range pkg.Trains {
 		writeString(&buf, train.ID)
@@ -242,12 +283,9 @@ func encodeToGzip(pkg *DataPackage) ([]byte, error) {
 		binary.Write(&buf, binary.LittleEndian, int32(train.TotalSeats))
 		writeString(&buf, train.OperatingDay)
 
-		// Origin
 		binary.Write(&buf, binary.LittleEndian, int32(pkg.StationMap[train.Origin.ID]))
-		// Destination
 		binary.Write(&buf, binary.LittleEndian, int32(pkg.StationMap[train.Destination.ID]))
 
-		// Stops
 		binary.Write(&buf, binary.LittleEndian, int32(len(train.Stops)))
 		for _, stop := range train.Stops {
 			binary.Write(&buf, binary.LittleEndian, int32(pkg.StationMap[stop.Station.ID]))
@@ -256,7 +294,6 @@ func encodeToGzip(pkg *DataPackage) ([]byte, error) {
 		}
 	}
 
-	// Stations
 	binary.Write(&buf, binary.LittleEndian, int32(len(pkg.Stations)))
 	for _, station := range pkg.Stations {
 		writeString(&buf, station.ID)
@@ -268,7 +305,6 @@ func encodeToGzip(pkg *DataPackage) ([]byte, error) {
 		binary.Write(&buf, binary.LittleEndian, station.Longitude)
 	}
 
-	// Compression gzip
 	var gzBuf bytes.Buffer
 	gz := gzip.NewWriter(&gzBuf)
 	if _, err := gz.Write(buf.Bytes()); err != nil {
@@ -281,131 +317,7 @@ func encodeToGzip(pkg *DataPackage) ([]byte, error) {
 	return gzBuf.Bytes(), nil
 }
 
-// LoadFromGzip décode les données depuis binaire gzippé
-func LoadFromGzip(path string) (*DataPackage, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	gz, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	defer gz.Close()
-
-	decompressed, err := io.ReadAll(gz)
-	if err != nil {
-		return nil, err
-	}
-
-	return decodeFromBinary(decompressed)
-}
-
-// decodeFromBinary décode le format binaire
-func decodeFromBinary(data []byte) (*DataPackage, error) {
-	r := bytes.NewReader(data)
-	pkg := &DataPackage{
-		StationMap: make(map[string]int),
-	}
-
-	// Header
-	magic := make([]byte, len(dataMagic))
-	if _, err := r.Read(magic); err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(magic, []byte(dataMagic)) {
-		return nil, fmt.Errorf("magic invalide")
-	}
-
-	var version int32
-	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
-		return nil, err
-	}
-	pkg.Version = int(version)
-
-	if err := binary.Read(r, binary.LittleEndian, &pkg.Timestamp); err != nil {
-		return nil, err
-	}
-
-	// Trains
-	var trainCount int32
-	if err := binary.Read(r, binary.LittleEndian, &trainCount); err != nil {
-		return nil, err
-	}
-	pkg.Trains = make([]TrainData, trainCount)
-
-	for i := 0; i < int(trainCount); i++ {
-		train := TrainData{}
-		train.ID, _ = readString(r)
-		train.TrainNumber, _ = readString(r)
-		train.Departure, _ = readString(r)
-		train.Arrival, _ = readString(r)
-		train.DepartureTime, _ = readString(r)
-		train.ArrivalTime, _ = readString(r)
-
-		var availSeats, totalSeats int32
-		binary.Read(r, binary.LittleEndian, &availSeats)
-		binary.Read(r, binary.LittleEndian, &totalSeats)
-		train.AvailableSeats = int(availSeats)
-		train.TotalSeats = int(totalSeats)
-
-		train.OperatingDay, _ = readString(r)
-
-		var originIdx, destIdx int32
-		binary.Read(r, binary.LittleEndian, &originIdx)
-		binary.Read(r, binary.LittleEndian, &destIdx)
-
-		var stopCount int32
-		binary.Read(r, binary.LittleEndian, &stopCount)
-		train.Stops = make([]StopInfo, stopCount)
-		for j := 0; j < int(stopCount); j++ {
-			var stationIdx int32
-			binary.Read(r, binary.LittleEndian, &stationIdx)
-			train.Stops[j].Arrival, _ = readString(r)
-			train.Stops[j].Departure, _ = readString(r)
-		}
-
-		pkg.Trains[i] = train
-	}
-
-	// Stations
-	var stationCount int32
-	if err := binary.Read(r, binary.LittleEndian, &stationCount); err != nil {
-		return nil, err
-	}
-	pkg.Stations = make([]StationRef, stationCount)
-
-	for i := 0; i < int(stationCount); i++ {
-		station := StationRef{}
-		station.ID, _ = readString(r)
-		station.Name, _ = readString(r)
-		station.Code, _ = readString(r)
-		station.City, _ = readString(r)
-		station.Country, _ = readString(r)
-		binary.Read(r, binary.LittleEndian, &station.Latitude)
-		binary.Read(r, binary.LittleEndian, &station.Longitude)
-
-		pkg.Stations[i] = station
-		pkg.StationMap[station.ID] = i
-	}
-
-	return pkg, nil
-}
-
 func writeString(w *bytes.Buffer, s string) {
 	binary.Write(w, binary.LittleEndian, int32(len(s)))
 	w.WriteString(s)
-}
-
-func readString(r *bytes.Reader) (string, error) {
-	var length int32
-	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
-		return "", err
-	}
-	buf := make([]byte, length)
-	if _, err := r.Read(buf); err != nil {
-		return "", err
-	}
-	return string(buf), nil
 }
