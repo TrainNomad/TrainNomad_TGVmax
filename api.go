@@ -4,59 +4,98 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
-type Server struct {
-	data         *DataPackage
-	mu           sync.RWMutex
-	started      time.Time
-	dataLoadedAt time.Time
-	loadMs       int64
-	stationIndex map[string]*StationRef
+type StopRef struct {
+	ID      string  `json:"id"`
+	Name    string  `json:"name"`
+	City    string  `json:"city"`
+	Country string  `json:"country"`
+	Lat     float32 `json:"lat"`
+	Lon     float32 `json:"lon"`
 }
 
-func newServer() *Server {
-	return &Server{
-		started:      time.Now(),
-		stationIndex: make(map[string]*StationRef),
-	}
+type StopTime struct {
+	StopRef
+	Arrival   string `json:"arrival,omitempty"`
+	Departure string `json:"departure,omitempty"`
+}
+
+// Leg : "train" ou "transfer" (changement dans la même gare, marche ou traversée de ville).
+type Leg struct {
+	Type        string  `json:"type"`
+	From        StopRef `json:"from"`
+	To          StopRef `json:"to"`
+	Departure   string  `json:"departure,omitempty"`
+	Arrival     string  `json:"arrival,omitempty"`
+	DurationMin int32   `json:"duration_min"`
+
+	// train
+	Operator     string     `json:"operator,omitempty"`
+	OperatorName string     `json:"operator_name,omitempty"`
+	TrainType    string     `json:"train_type,omitempty"`
+	TrainNumber  string     `json:"train_number,omitempty"`
+	Headsign     string     `json:"headsign,omitempty"`
+	CheckinMin   int        `json:"checkin_min,omitempty"`
+	Stops        []StopTime `json:"stops,omitempty"`
+
+	// transfer
+	TransferKind string `json:"transfer_kind,omitempty"` // "same_station" | "walk" | "city"
+	MinMin       int32  `json:"min_transfer_min,omitempty"`
+	WaitMin      int32  `json:"wait_min,omitempty"`
+}
+
+type Journey struct {
+	ID          string   `json:"id"`
+	Departure   string   `json:"departure"`
+	Arrival     string   `json:"arrival"`
+	DurationMin int32    `json:"duration_min"`
+	Transfers   int      `json:"transfers"`
+	From        StopRef  `json:"from"`
+	To          StopRef  `json:"to"`
+	Operators   []string `json:"operators"`
+	TrainTypes  []string `json:"train_types"`
+	Legs        []Leg    `json:"legs"`
+}
+
+type apiError struct {
+	Error   string   `json:"error"`
+	Detail  string   `json:"detail,omitempty"`
+	Suggest []*Place `json:"suggestions,omitempty"`
+}
+
+func fmtTime(t time.Time) string { return t.Format("2006-01-02T15:04:05-07:00") }
+
+type Server struct {
+	e       *Engine
+	started time.Time
+	loadMs  int64
 }
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/stations", s.handleStationsSearch)
+	mux.HandleFunc("/stations", s.handleStations)
 	mux.HandleFunc("/search", s.handleSearch)
-
-	// Legacy endpoints (backward compatibility)
-	mux.HandleFunc("/api/tgvmax/search", s.handleSearch)
-	mux.HandleFunc("/api/tgvmax/stations", s.handleStationsSearch)
-	mux.HandleFunc("/api/tgvmax/reload", s.handleReload)
-
+	mux.HandleFunc("/explorer", s.handleExplorer)
 	return withMiddleware(mux)
 }
 
 func withMiddleware(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-
 		h.ServeHTTP(w, r)
 	})
 }
@@ -106,288 +145,252 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, r, http.StatusOK, map[string]any{
-		"name":      "TGVmax routing API",
-		"version":   "2.0",
-		"endpoints": []string{"/health", "/stations?q=", "/search?from=&to=&date="},
+		"name":      "TrainNomad routing API",
+		"endpoints": []string{"/health", "/stations?q=", "/search?from=&to=&date=&time=", "/explorer?from=&date="},
 	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	trainCount := 0
-	stationCount := 0
-	if s.data != nil {
-		trainCount = len(s.data.Trains)
-		stationCount = len(s.data.Stations)
-	}
-	dataLoadedAt := s.dataLoadedAt
-	loadMs := s.loadMs
-	s.mu.RUnlock()
-
+	n := s.e.Net
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-
 	writeJSON(w, r, http.StatusOK, map[string]any{
-		"status":          "ok",
-		"timestamp":       time.Now(),
-		"trains_count":    trainCount,
-		"stations_count":  stationCount,
-		"data_loaded_at":  dataLoadedAt,
-		"load_ms":         loadMs,
-		"uptime_s":        int(time.Since(s.started).Seconds()),
-		"memory_mb": map[string]float64{
-			"heap": float64(m.HeapAlloc) / 1e6,
-			"sys":  float64(m.Sys) / 1e6,
-		},
+		"status":     "ok",
+		"built_at":   n.Meta.BuiltAt,
+		"valid_from": n.FirstDate().Format("2006-01-02"),
+		"valid_to":   n.LastDate().Format("2006-01-02"),
+		"operators":  n.Meta.Operators,
+		"stops":      n.NumStops(),
+		"routes":     n.NumRoutes(),
+		"trips":      len(n.TripDays),
+		"load_ms":    s.loadMs,
+		"uptime_s":   int(time.Since(s.started).Seconds()),
+		"memory_mb":  map[string]float64{"heap": float64(m.HeapAlloc) / 1e6, "sys": float64(m.Sys) / 1e6},
+		"build":      n.Meta.Stats,
 	})
 }
 
-func (s *Server) handleStationsSearch(w http.ResponseWriter, r *http.Request) {
-	q := param(r, "q", "query")
+func (s *Server) handleStations(w http.ResponseWriter, r *http.Request) {
+	q := param(r, "q")
 	limit := intParam(r, "limit", 10, 1, 50)
+	res := s.e.Places.Search(q, limit)
+	if res == nil {
+		res = []*Place{}
+	}
+	writeJSON(w, r, http.StatusOK, map[string]any{"results": res})
+}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.data == nil {
-		writeJSON(w, r, http.StatusServiceUnavailable, apiError{
-			Error:  "data_not_loaded",
-			Detail: "Les données ne sont pas disponibles",
-		})
+// resolveQuery lit origine, date et heure communes à /search et /explorer.
+func (s *Server) resolveQuery(w http.ResponseWriter, r *http.Request, fromKeys []string) (from *Place, day int, t time.Time, ok bool) {
+	n := s.e.Net
+	fromV := param(r, fromKeys...)
+	from = s.e.Places.Resolve(fromV)
+	if from == nil {
+		writeJSON(w, r, http.StatusNotFound, apiError{Error: "unknown_origin", Detail: fmt.Sprintf("Gare ou ville inconnue : %q", fromV)})
 		return
 	}
-
-	var results []StationRef
-	if q == "" {
-		for i := 0; i < len(s.data.Stations) && i < limit; i++ {
-			results = append(results, s.data.Stations[i])
-		}
-	} else {
-		q = strings.ToLower(q)
-		for _, st := range s.data.Stations {
-			if len(results) >= limit {
-				break
-			}
-			if strings.Contains(strings.ToLower(st.Name), q) ||
-				strings.Contains(strings.ToLower(st.City), q) ||
-				strings.Contains(strings.ToLower(st.ID), q) {
-				results = append(results, st)
-			}
-		}
+	loc := n.Locations[n.StopTZ[from.stops[0]]]
+	now := time.Now().In(loc)
+	dateV := param(r, "date")
+	if dateV == "" {
+		dateV = now.Format("2006-01-02")
 	}
+	d, err := time.ParseInLocation("2006-01-02", dateV, loc)
+	if err != nil {
+		writeJSON(w, r, http.StatusBadRequest, apiError{Error: "bad_date", Detail: "Format attendu : YYYY-MM-DD"})
+		return
+	}
+	hh, mm := 0, 0
+	if tv := param(r, "time", "departure_time"); tv != "" {
+		parts := strings.Split(tv, ":")
+		h, e1 := strconv.Atoi(parts[0])
+		var e2 error
+		if len(parts) > 1 {
+			mm, e2 = strconv.Atoi(parts[1])
+		}
+		if e1 != nil || e2 != nil || h < 0 || h > 23 || mm < 0 || mm > 59 {
+			writeJSON(w, r, http.StatusBadRequest, apiError{Error: "bad_time", Detail: "Format attendu : HH:MM"})
+			return
+		}
+		hh = h
+	}
+	day = n.DayIndex(d)
+	if d.Before(n.FirstDate().AddDate(0, 0, -1)) || d.After(n.LastDate()) {
+		writeJSON(w, r, http.StatusBadRequest, apiError{Error: "date_out_of_range", Detail: fmt.Sprintf("Horaires disponibles du %s au %s",
+			n.FirstDate().Format("2006-01-02"), n.LastDate().Format("2006-01-02"))})
+		return
+	}
+	t = time.Date(d.Year(), d.Month(), d.Day(), hh, mm, 0, 0, loc)
+	return from, day, t, true
+}
 
-	writeJSON(w, r, http.StatusOK, map[string]any{
-		"results": results,
-		"count":   len(results),
-	})
+func (s *Server) minutes(t time.Time) int32 {
+	return int32(t.Sub(s.e.Net.BaseDate) / time.Minute)
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost && r.Method != http.MethodGet {
-		writeJSON(w, r, http.StatusMethodNotAllowed, apiError{
-			Error:  "method_not_allowed",
-			Detail: "Use GET or POST",
-		})
+	from, day, t, ok := s.resolveQuery(w, r, []string{"from", "origin"})
+	if !ok {
 		return
 	}
-
-	from := param(r, "from", "origin")
-	to := param(r, "to", "destination")
-	date := param(r, "date")
-	freeOnly := r.URL.Query().Get("free_only") == "true"
-	limit := intParam(r, "limit", 50, 1, 200)
-
-	if from == "" || to == "" {
-		writeJSON(w, r, http.StatusBadRequest, apiError{
-			Error:  "missing_parameters",
-			Detail: "from and to are required",
-		})
+	toV := param(r, "to", "destination")
+	to := s.e.Places.Resolve(toV)
+	if to == nil {
+		writeJSON(w, r, http.StatusNotFound, apiError{Error: "unknown_destination", Detail: fmt.Sprintf("Gare ou ville inconnue : %q", toV)})
 		return
 	}
-
-	s.mu.RLock()
-	results := s.filterTrains(from, to, date, freeOnly, limit)
-	s.mu.RUnlock()
-
-	writeJSON(w, r, http.StatusOK, map[string]any{
-		"query": map[string]string{
-			"from": from,
-			"to":   to,
-			"date": date,
-		},
-		"results": results,
-		"count":   len(results),
-	})
-}
-
-func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, r, http.StatusMethodNotAllowed, apiError{
-			Error:  "method_not_allowed",
-			Detail: "Use POST",
-		})
+	if from.ID == to.ID {
+		writeJSON(w, r, http.StatusBadRequest, apiError{Error: "same_place", Detail: "Origine et destination identiques"})
 		return
 	}
+	limit := intParam(r, "limit", 10, 1, 50)
+	maxTransfers := intParam(r, "max_transfers", 6, 0, 8)
 
-	secret := r.Header.Get("X-Reload-Secret")
-	expectedSecret := os.Getenv("RELOAD_SECRET")
-	if expectedSecret != "" && secret != expectedSecret {
-		writeJSON(w, r, http.StatusUnauthorized, apiError{
-			Error: "unauthorized",
-		})
-		return
-	}
-
-	log.Println("Rechargement des données en cours...")
 	start := time.Now()
+	raw := s.e.Search(from, to, day, s.minutes(t), limit, maxTransfers)
+	elapsed := time.Since(start)
 
-	if err := s.loadData(); err != nil {
-		writeJSON(w, r, http.StatusInternalServerError, apiError{
-			Error:  "reload_failed",
-			Detail: err.Error(),
-		})
-		return
-	}
-
-	duration := time.Since(start)
-	writeJSON(w, r, http.StatusOK, map[string]any{
-		"status":       "success",
-		"message":      "Data reloaded",
-		"duration_ms":  duration.Milliseconds(),
-		"timestamp":    time.Now(),
-	})
-
-	log.Printf("✓ Rechargement terminé en %v", duration)
-}
-
-func (s *Server) filterTrains(from, to, date string, freeOnly bool, limit int) []SearchResult {
-	if s.data == nil {
-		return []SearchResult{}
-	}
-
-	var results []SearchResult
-	from = strings.ToLower(from)
-	to = strings.ToLower(to)
-
-	for _, train := range s.data.Trains {
-		if len(results) >= limit {
+	journeys := make([]Journey, 0, limit)
+	dt := s.e.tables.get(day)
+	for i, j := range raw {
+		if i == limit {
 			break
 		}
-
-		if !stringMatches(train.Departure, from) && !stringMatches(train.Origin.ID, from) &&
-			!stringMatches(train.Origin.City, from) && !stringMatches(train.Origin.Name, from) {
-			continue
-		}
-
-		if !stringMatches(train.Arrival, to) && !stringMatches(train.Destination.ID, to) &&
-			!stringMatches(train.Destination.City, to) && !stringMatches(train.Destination.Name, to) {
-			continue
-		}
-
-		if date != "" && train.OperatingDay != date {
-			continue
-		}
-
-		if freeOnly && train.AvailableSeats <= 0 {
-			continue
-		}
-
-		dur := calculateDuration(train.DepartureTime, train.ArrivalTime)
-
-		result := SearchResult{
-			ID:              train.ID,
-			TrainNumber:     train.TrainNumber,
-			Departure:       train.Departure,
-			Arrival:         train.Arrival,
-			DepartureTime:   train.DepartureTime,
-			ArrivalTime:     train.ArrivalTime,
-			Origin:          train.Origin,
-			Destination:     train.Destination,
-			AvailableSeats:  train.AvailableSeats,
-			TotalSeats:      train.TotalSeats,
-			FreeSeatsOnly:   freeOnly,
-			DurationMinutes: dur,
-		}
-
-		results = append(results, result)
+		journeys = append(journeys, s.toJourney(dt, j))
 	}
 
-	return results
-}
-
-func stringMatches(haystack, needle string) bool {
-	if needle == "" {
-		return true
+	var next map[string]string
+	nextMin := s.minutes(t) + 24*60
+	if len(raw) > 0 {
+		nextMin = raw[min(limit, len(raw))-1].dep + 1
 	}
-	haystack = strings.ToLower(haystack)
-	needle = strings.ToLower(needle)
-	return haystack == needle || strings.Contains(haystack, needle)
-}
-
-func calculateDuration(depStr, arrStr string) int {
-	depHour, depMin := parseTime(depStr)
-	arrHour, arrMin := parseTime(arrStr)
-
-	depTotalMin := depHour*60 + depMin
-	arrTotalMin := arrHour*60 + arrMin
-
-	if arrTotalMin < depTotalMin {
-		arrTotalMin += 24 * 60
+	if nt := s.e.Net.BaseDate.Add(time.Duration(nextMin) * time.Minute).In(t.Location()); !nt.After(s.e.Net.LastDate().AddDate(0, 0, 1)) {
+		next = map[string]string{"date": nt.Format("2006-01-02"), "time": nt.Format("15:04")}
 	}
 
-	return arrTotalMin - depTotalMin
+	writeJSON(w, r, http.StatusOK, map[string]any{
+		"from":       from,
+		"to":         to,
+		"date":       t.Format("2006-01-02"),
+		"time":       t.Format("15:04"),
+		"count":      len(journeys),
+		"next":       next,
+		"compute_ms": elapsed.Milliseconds(),
+		"journeys":   journeys,
+	})
 }
 
-func parseTime(timeStr string) (int, int) {
-	hour, min := 0, 0
-	fmt.Sscanf(timeStr, "%d:%d", &hour, &min)
-	return hour, min
-}
-
-func (s *Server) loadData() error {
+func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
+	from, day, t, ok := s.resolveQuery(w, r, []string{"from", "origin"})
+	if !ok {
+		return
+	}
+	maxTransfers := intParam(r, "max_transfers", 2, 0, 6)
+	endOfDay := time.Date(t.Year(), t.Month(), t.Day()+1, 0, 0, 0, 0, t.Location())
+	tEnd := s.minutes(endOfDay)
+	if tEnd-s.minutes(t) < 60 {
+		tEnd = s.minutes(t) + 60
+	}
 	start := time.Now()
-
-	dataPath := findDataFile()
-	if dataPath == "" {
-		log.Println("Fichier data.bin.gz non trouvé localement")
-		return fmt.Errorf("data.bin.gz not found in any expected location")
+	dests := s.e.Explore(from, day, s.minutes(t), tEnd, maxTransfers)
+	if limit := intParam(r, "limit", 0, 0, 5000); limit > 0 && len(dests) > limit {
+		dests = dests[:limit]
 	}
-
-	pkg, err := LoadFromGzip(dataPath)
-	if err != nil {
-		return fmt.Errorf("chargement %s : %w", dataPath, err)
-	}
-
-	stationIndex := make(map[string]*StationRef)
-	for i := range pkg.Stations {
-		stationIndex[pkg.Stations[i].ID] = &pkg.Stations[i]
-	}
-
-	s.mu.Lock()
-	s.data = pkg
-	s.stationIndex = stationIndex
-	s.dataLoadedAt = time.Now()
-	s.loadMs = time.Since(start).Milliseconds()
-	s.mu.Unlock()
-
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	log.Printf("✓ %d trains et %d gares chargés en %d ms (heap: %.1f Mo)",
-		len(pkg.Trains), len(pkg.Stations), s.loadMs, float64(m.HeapAlloc)/1e6)
-	return nil
+	writeJSON(w, r, http.StatusOK, map[string]any{
+		"from":          from,
+		"date":          t.Format("2006-01-02"),
+		"time":          t.Format("15:04"),
+		"max_transfers": maxTransfers,
+		"count":         len(dests),
+		"compute_ms":    time.Since(start).Milliseconds(),
+		"destinations":  dests,
+	})
 }
 
-func findDataFile() string {
-	paths := []string{
-		dataFileName,
-		"data/" + dataFileName,
-		"../data/" + dataFileName,
-		"/app/" + dataFileName,
+func (s *Server) stopRef(p int32) StopRef {
+	n := s.e.Net
+	return StopRef{
+		ID: "station:" + n.StopID[p], Name: n.StopName[p], City: n.CityName[n.StopCity[p]],
+		Country: n.StopCountry[p], Lat: n.StopLat[p], Lon: n.StopLon[p],
 	}
-	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
-			return p
+}
+
+func (s *Server) toJourney(dt *DayTable, j rawJourney) Journey {
+	n := s.e.Net
+	out := Journey{DurationMin: j.arr - j.dep, Transfers: j.trains - 1, Operators: []string{}, TrainTypes: []string{}}
+	seenOp, seenType := map[string]bool{}, map[string]bool{}
+	var ids []string
+
+	var prevArr int32
+	var prevStop int32 = -1
+	var pendingWalk *rawLeg
+	for li := range j.legs {
+		l := j.legs[li]
+		if l.walk {
+			pendingWalk = &j.legs[li]
+			continue
 		}
+		stops := n.routeStops(l.route)
+		S := len(stops)
+		off := dt.TimeOff[l.route] + uint32(int(l.inst)*S)
+		trip := dt.InstTrip[dt.InstOff[l.route]+uint32(l.inst)]
+		dep, arr := dt.Dep[off+uint32(l.board)], dt.Arr[off+uint32(l.alight)]
+		boardStop, alightStop := stops[l.board], stops[l.alight]
+
+		if prevStop >= 0 {
+			tr := Leg{Type: "transfer", From: s.stopRef(prevStop), To: s.stopRef(boardStop), WaitMin: dep - prevArr}
+			if pendingWalk != nil {
+				m := footpathMinutes(n, pendingWalk.fromStop, pendingWalk.toStop)
+				tr.DurationMin, tr.MinMin = m, m
+				tr.TransferKind = "walk"
+				if n.StopCity[prevStop] == n.StopCity[boardStop] && m > 30 {
+					tr.TransferKind = "city"
+				}
+			} else {
+				tr.TransferKind = "same_station"
+				tr.MinMin = int32(n.StopChange[prevStop])
+				tr.DurationMin = tr.MinMin
+			}
+			out.Legs = append(out.Legs, tr)
+		}
+
+		op := n.Meta.Operators[n.TripOp[trip]]
+		ttype := n.Meta.Types[n.TripType[trip]]
+		leg := Leg{
+			Type: "train", From: s.stopRef(boardStop), To: s.stopRef(alightStop),
+			Departure: fmtTime(n.TimeAt(dep, boardStop)), Arrival: fmtTime(n.TimeAt(arr, alightStop)),
+			DurationMin: arr - dep, Operator: op.ID, OperatorName: op.Name, TrainType: ttype,
+			TrainNumber: n.TripNumber[trip], Headsign: n.StopName[stops[S-1]],
+			CheckinMin: int(n.RouteCheckin[l.route]),
+		}
+		for i := l.board; i <= l.alight; i++ {
+			st := StopTime{StopRef: s.stopRef(stops[i])}
+			if i > l.board {
+				st.Arrival = fmtTime(n.TimeAt(dt.Arr[off+uint32(i)], stops[i]))
+			}
+			if i < l.alight {
+				st.Departure = fmtTime(n.TimeAt(dt.Dep[off+uint32(i)], stops[i]))
+			}
+			leg.Stops = append(leg.Stops, st)
+		}
+		out.Legs = append(out.Legs, leg)
+		if !seenOp[op.ID] {
+			seenOp[op.ID] = true
+			out.Operators = append(out.Operators, op.ID)
+		}
+		if !seenType[ttype] {
+			seenType[ttype] = true
+			out.TrainTypes = append(out.TrainTypes, ttype)
+		}
+		ids = append(ids, fmt.Sprintf("%s-%s", n.TripNumber[trip], n.TimeAt(dep, boardStop).Format("0601021504")))
+		if prevStop < 0 {
+			out.From = s.stopRef(boardStop)
+			out.Departure = leg.Departure
+		}
+		out.To = s.stopRef(alightStop)
+		out.Arrival = leg.Arrival
+		prevArr, prevStop, pendingWalk = arr, alightStop, nil
 	}
-	return ""
+	out.ID = strings.Join(ids, "_")
+	return out
 }
