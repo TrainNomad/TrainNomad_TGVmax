@@ -1,13 +1,13 @@
 {
-  "first_date": "2026-09-30",
-  "last_date": "2026-10-30",
-  "stops_matched_ref": 219,
-  "trips_TGVMAX": 12548,
+  "first_date": "2026-10-01",
+  "last_date": "2026-10-31",
+  "stops_matched_ref": 221,
+  "trips_TGVMAX": 12727,
   "routes": 4163,
-  "trips": 12548,
-  "stops": 219,
-  "cities": 202,
-  "footpaths": 54,
-  "stop_times": 50323,
-  "day_sets": 985
+  "trips": 12727,
+  "stops": 221,
+  "cities": 203,
+  "footpaths": 56,
+  "stop_times": 51280,
+  "day_sets": 1008
 }
