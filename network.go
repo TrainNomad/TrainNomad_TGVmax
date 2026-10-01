@@ -9,7 +9,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -34,6 +33,9 @@ type Meta struct {
 	Types     []string       `json:"types"`
 	Operators []Operator     `json:"operators"`
 	Stats     map[string]int `json:"stats"`
+	// Changement de siège : attente maximale (minutes) pour rester dans le même train (même numéro)
+	// en enchaînant deux trajets, sans temps de correspondance. 0 (absent) = désactivé (réseau Europe).
+	SeatChangeMax int `json:"seat_change_max"`
 }
 
 // Network est le réseau compilé par build_network.py, entièrement en RAM (quelques Mo).
@@ -80,6 +82,7 @@ type Network struct {
 	StopRouteOff []uint32 // CSR gare -> (route, position dans la route)
 	StopRoutes   []int32
 	StopRoutePos []uint16
+	TripNum      []int32   // identifiant entier de TripNumber (comparaison rapide : même train ?)
 	dayBase      [][]int32 // [fuseau][jour] minutes UTC (depuis BaseDate) de "midi - 12 h" local
 
 	// Graphe inverse des temps de parcours minimaux (gare -> gares précédentes), pour les bornes
@@ -124,25 +127,28 @@ type section struct {
 }
 
 func LoadNetwork(path string) (*Network, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	var r io.Reader = f
-	if strings.HasSuffix(path, ".gz") {
-		gz, err := gzip.NewReader(f)
+	return LoadNetworkBytes(data)
+}
+
+// LoadNetworkBytes : réseau brut ou compressé (gzip détecté par sa signature, pas par l'extension).
+func LoadNetworkBytes(data []byte) (*Network, error) {
+	if len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b {
+		gz, err := gzip.NewReader(bytes.NewReader(data))
 		if err != nil {
 			return nil, err
 		}
 		defer gz.Close()
-		r = gz
+		raw, err := io.ReadAll(gz)
+		if err != nil {
+			return nil, err
+		}
+		return parseNetwork(raw)
 	}
-	raw, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-	return parseNetwork(raw)
+	return parseNetwork(data)
 }
 
 func parseNetwork(raw []byte) (*Network, error) {
@@ -313,6 +319,17 @@ func (n *Network) derive() error {
 	}
 
 	n.buildLowerBoundGraph()
+
+	numID := map[string]int32{}
+	n.TripNum = make([]int32, len(n.TripNumber))
+	for t, s := range n.TripNumber {
+		id, ok := numID[s]
+		if !ok {
+			id = int32(len(numID))
+			numID[s] = id
+		}
+		n.TripNum[t] = id
+	}
 
 	n.CityStops = make([][]int32, len(n.CityID))
 	n.CityWeight = make([]float32, len(n.CityID))

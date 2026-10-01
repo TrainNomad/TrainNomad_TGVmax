@@ -51,6 +51,10 @@ HUB_DAILY_DEPARTURES = 150  # seuil "grande gare" (départs moyens par jour)
 WALK_MAX_KM = 1.0           # correspondance à pied entre deux gares proches
 CITY_MAX_KM = 20.0          # correspondance en transport urbain dans la même ville
 CITY_TRANSFER_MAX = 90      # plafond (minutes) d'une traversée de ville
+# Changement de siège : enchaîner deux billets TGVmax dans le MÊME train (même numéro) sans les
+# 10 min de correspondance. La valeur est l'attente maximale en gare (garde-fou : c'est bien le même
+# passage du train) ; en pratique l'arrêt dure 2 à 5 min. 0 = désactivé.
+SEAT_CHANGE_MAX = 30
 
 NO_PICKUP = 1
 NO_DROPOFF = 2
@@ -436,6 +440,7 @@ class NetworkBuilder:
             "ndays": self.ndays, "words": words,
             "timezones": self.timezones, "types": self.types,
             "operators": OPERATORS,
+            "seat_change_max": SEAT_CHANGE_MAX,
             "stats": {k: int(v) for k, v in self.stats.items()},
         }
 

@@ -45,7 +45,7 @@ type Leg struct {
 	Stops        []StopTime `json:"stops,omitempty"`
 
 	// transfer
-	TransferKind string `json:"transfer_kind,omitempty"` // "same_station" | "walk" | "city"
+	TransferKind string `json:"transfer_kind,omitempty"` // "same_station" | "walk" | "city" | "seat_change"
 	MinMin       int32  `json:"min_transfer_min,omitempty"`
 	WaitMin      int32  `json:"wait_min,omitempty"`
 }
@@ -56,6 +56,7 @@ type Journey struct {
 	Arrival     string   `json:"arrival"`
 	DurationMin int32    `json:"duration_min"`
 	Transfers   int      `json:"transfers"`
+	SeatChanges int      `json:"seat_changes,omitempty"` // parmi les correspondances : changements de siège dans le même train
 	From        StopRef  `json:"from"`
 	To          StopRef  `json:"to"`
 	Operators   []string `json:"operators"`
@@ -71,19 +72,28 @@ type apiError struct {
 
 func fmtTime(t time.Time) string { return t.Format("2006-01-02T15:04:05-07:00") }
 
+// Server : instantané du réseau pour une requête (le réseau peut être remplacé à chaud entre deux requêtes).
 type Server struct {
-	e       *Engine
-	started time.Time
-	loadMs  int64
+	e   *Engine
+	st  *netState
+	app *App
 }
 
-func (s *Server) routes() http.Handler {
+func (a *App) routes() http.Handler {
+	h := func(fn func(*Server, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			st := a.cur.Load()
+			fn(&Server{e: st.e, st: st, app: a}, w, r)
+		}
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleRoot)
-	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/stations", s.handleStations)
-	mux.HandleFunc("/search", s.handleSearch)
-	mux.HandleFunc("/explorer", s.handleExplorer)
+	mux.HandleFunc("/", h((*Server).handleRoot))
+	mux.HandleFunc("/health", h((*Server).handleHealth))
+	mux.HandleFunc("/stations", h((*Server).handleStations))
+	mux.HandleFunc("/search", h((*Server).handleSearch))
+	mux.HandleFunc("/explorer", h((*Server).handleExplorer))
+	mux.HandleFunc("/featured", h((*Server).handleFeatured))
+	mux.HandleFunc("/reload", a.handleReload)
 	return withMiddleware(mux)
 }
 
@@ -147,7 +157,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, http.StatusOK, map[string]any{
 		"name":      "TrainNomad TGVmax API",
 		"about":     "Trajets en train avec des places TGVmax disponibles (données SNCF Open Data, mises à jour chaque jour)",
-		"endpoints": []string{"/health", "/stations?q=", "/search?from=&to=&date=&time=", "/explorer?from=&date="},
+		"endpoints": []string{"/health", "/stations?q=", "/search?from=&to=&date=&time=", "/explorer?from=&date=", "/featured"},
 	})
 }
 
@@ -164,8 +174,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"stops":      n.NumStops(),
 		"routes":     n.NumRoutes(),
 		"trips":      len(n.TripDays),
-		"load_ms":    s.loadMs,
-		"uptime_s":   int(time.Since(s.started).Seconds()),
+		"load_ms":    s.st.loadMs,
+		"uptime_s":   int(time.Since(s.app.started).Seconds()),
+		"network":    s.app.status(),
 		"memory_mb":  map[string]float64{"heap": float64(m.HeapAlloc) / 1e6, "sys": float64(m.Sys) / 1e6},
 		"build":      n.Meta.Stats,
 	})
@@ -248,7 +259,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	maxTransfers := intParam(r, "max_transfers", 6, 0, 8)
 
 	start := time.Now()
-	raw := s.e.Search(from, to, day, s.minutes(t), limit, maxTransfers)
+	raw := s.e.Search(from, to, day, s.minutes(t), limit, maxTransfers, false) // TGVmax : pas de prix, pas de variante
 	elapsed := time.Since(start)
 
 	journeys := make([]Journey, 0, limit)
@@ -340,7 +351,11 @@ func (s *Server) toJourney(dt *DayTable, j rawJourney) Journey {
 
 		if prevStop >= 0 {
 			tr := Leg{Type: "transfer", From: s.stopRef(prevStop), To: s.stopRef(boardStop), WaitMin: dep - prevArr}
-			if pendingWalk != nil {
+			if l.seat {
+				tr.TransferKind = "seat_change"
+				tr.DurationMin = dep - prevArr
+				out.SeatChanges++
+			} else if pendingWalk != nil {
 				m := footpathMinutes(n, pendingWalk.fromStop, pendingWalk.toStop)
 				tr.DurationMin, tr.MinMin = m, m
 				tr.TransferKind = "walk"

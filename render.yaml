@@ -5,3 +5,20 @@ services:
     plan: free
     healthCheckPath: /health
     autoDeploy: true
+    # Ne rebuild que si le code change : les données arrivent par la Release GitHub (rechargement à chaud),
+    # pas par un commit. Modifier le README ou build_network.py ne déclenche donc aucun build.
+    buildFilter:
+      paths:
+        - "*.go"
+        - go.mod
+        - Dockerfile
+        - render.yaml
+    envVars:
+      # Réseau téléchargé au démarrage puis vérifié toutes les NETWORK_REFRESH (repli : network.bin.gz de l'image).
+      - key: NETWORK_URL
+        value: https://github.com/TrainNomad/TrainNomad_TGVmax/releases/download/network-latest/network.bin.gz
+      - key: NETWORK_REFRESH
+        value: 1h
+      # Active POST /reload (appelé par la GitHub Action). Même valeur que le secret GitHub RELOAD_TOKEN.
+      - key: RELOAD_TOKEN
+        sync: false

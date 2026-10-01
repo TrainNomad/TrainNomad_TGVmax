@@ -16,12 +16,29 @@ tgvmax_gtfs.zip  (GTFS standard)                    python build_network.py
 network.bin.gz   (format binaire TNNET001, identique à Europe, ~0,2 Mo)
         │  go test (le moteur doit le charger et trouver des trajets)
         ▼
-commit sur GitHub ──► Render redéploie l'image Docker (binaire Go + network.bin.gz)
+Release GitHub « network-latest » ──► l'API sur Render le télécharge et le recharge à chaud (sans build)
 ```
 
 La GitHub Action `.github/workflows/update_tgvmax.yml` exécute ce pipeline chaque jour à 5h15 UTC
 (ou à la demande via « Run workflow »). Des garde-fous empêchent de publier un réseau vide si l'export
 SNCF est incomplet.
+
+### Mise à jour sans redéploiement (Render gratuit)
+
+Les données ne passent plus par un commit : l'Action publie `network.bin.gz` dans la Release `network-latest`
+(URL fixe), et l'API (`reload.go`) le récupère elle-même. Render ne rebuild donc que si le code change
+(`buildFilter` de `render.yaml`), ce qui évite d'épuiser les minutes de build gratuites.
+
+- **Au démarrage** (et donc à chaque réveil d'une instance endormie) : téléchargement de `NETWORK_URL`,
+  repli sur le `network.bin.gz` de l'image si GitHub ne répond pas.
+- **Toutes les `NETWORK_REFRESH`** (1h par défaut) : nouvelle vérification (ETag + sha256). Le nouveau réseau
+  est compilé et vérifié à côté de l'ancien, puis échangé atomiquement ; un fichier invalide ou plus ancien est
+  ignoré et l'API continue sur le réseau actuel.
+- **`POST /reload`** (`Authorization: Bearer $RELOAD_TOKEN`) : rechargement immédiat, appelé par l'Action si les
+  secrets GitHub `TGVMAX_API_URL` et `RELOAD_TOKEN` sont définis. Route désactivée si `RELOAD_TOKEN` est vide.
+- `GET /health` → `network` : source (`url` ou `file:…`), sha256, `loaded_at`, `last_check`, `last_error`.
+
+En local, sans `NETWORK_URL`, l'API lit simplement le fichier comme avant.
 
 ### Choix de modélisation
 
@@ -30,6 +47,12 @@ SNCF est incomplet.
   propose donc que des billets réellement réservables (et les correspondances entre eux).
 - Les arrêts intermédiaires sont reconstitués à partir de tous les couples du train (OUI et NON), pour
   la liste des arrêts et le tracé sur la carte.
+- **Changement de siège** : deux billets TGVmax successifs dans le **même train** (ex. Besançon → Lyon puis
+  Lyon → Montpellier dans le 5521, quand Besançon → Montpellier est complet). Les correspondances classiques
+  gardent leurs 10 min (15 dans les grandes gares) ; rester dans le même train n'en demande aucune (l'arrêt dure
+  2 à 5 min). Réglage : `SEAT_CHANGE_MAX` dans `build_network.py` (attente maximale, garde-fou « même passage
+  du train »), écrit dans `seat_change_max` du réseau ; 0 = désactivé, valeur absente = réseau Europe. L'API renvoie
+  alors une correspondance `transfer_kind: "seat_change"` et `seat_changes` sur le trajet.
 - Le champ `date` est le jour de départ du train : les heures après minuit (trains de nuit) sont
   écrites `24:xx` comme le veut GTFS.
 - Gares : rapprochées du référentiel `stations.csv` par leur code SNCF (`FRPLY` = Paris Gare de Lyon).
@@ -47,8 +70,10 @@ SNCF est incomplet.
 | `tgvmax_test.go` | tests exécutés avant chaque publication |
 | `Dockerfile`, `render.yaml` | déploiement Render (Docker, offre gratuite) |
 
-Les fichiers `*.go` (hors test) sont des copies de `Europe/` : une amélioration du moteur Europe
-peut être recopiée telle quelle.
+Les fichiers `*.go` (hors test) viennent de `Europe/`. Seuls ajouts : le changement de siège (désactivé tant que
+le réseau ne contient pas `seat_change_max`, donc recopiable tel quel dans `Europe/`) et le port local par défaut 8002.
+
+Pour tout lancer en local (Europe + TGVmax + front) : `python ../run_local.py`.
 
 ## En local
 
@@ -57,7 +82,7 @@ pip install -r requirements.txt
 python sncf_to_gtfs.py        # --refresh pour forcer le téléchargement
 python build_network.py
 go test ./...
-go run .                      # http://localhost:8000
+go run .                      # http://localhost:8002 (Europe : 8000)
 ```
 
 ## Endpoints

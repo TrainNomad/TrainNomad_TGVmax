@@ -108,6 +108,49 @@ func (dt *DayTable) earliest(r int32, S, i int, t int32) int {
 	return best
 }
 
+// seatInstance renvoie l'instance de la route r portant le numéro de train num et partant de
+// l'arrêt i entre t et tMax (changement de siège dans le même train), ou -1.
+func (dt *DayTable) seatInstance(net *Network, r int32, S, i int, t, tMax int32, num int32) int {
+	off := dt.TimeOff[r]
+	n := dt.numInst(r)
+	q := 0
+	if dt.Sorted[r] {
+		q = sort.Search(n, func(q int) bool { return dt.Dep[off+uint32(q*S+i)] >= t })
+	}
+	for ; q < n; q++ {
+		d := dt.Dep[off+uint32(q*S+i)]
+		if d > tMax && dt.Sorted[r] {
+			break
+		}
+		if d >= t && d <= tMax && net.TripNum[dt.InstTrip[dt.InstOff[r]+uint32(q)]] == num {
+			return q
+		}
+	}
+	return -1
+}
+
+// allowed : l'instance q de la route r n'est pas d'un type de train exclu.
+func (dt *DayTable) allowed(n *Network, r int32, q int, exclude []bool) bool {
+	return exclude == nil || !exclude[n.TripType[dt.InstTrip[dt.InstOff[r]+uint32(q)]]]
+}
+
+// earliestAllowed : comme earliest, en sautant les trains d'un type exclu.
+func (dt *DayTable) earliestAllowed(n *Network, r int32, S, i int, t int32, exclude []bool) int {
+	q := dt.earliest(r, S, i, t)
+	if exclude == nil || q < 0 || dt.allowed(n, r, q, exclude) {
+		return q
+	}
+	off := dt.TimeOff[r]
+	best, bestT := -1, int32(0)
+	for q := 0; q < dt.numInst(r); q++ {
+		d := dt.Dep[off+uint32(q*S+i)]
+		if d >= t && (best < 0 || d < bestT) && dt.allowed(n, r, q, exclude) {
+			best, bestT = q, d
+		}
+	}
+	return best
+}
+
 // tableCache garde les DayTable des dernières dates interrogées (≈ 5 Mo chacune).
 type tableCache struct {
 	mu    sync.Mutex

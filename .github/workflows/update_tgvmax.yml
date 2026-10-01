@@ -1,6 +1,7 @@
 name: Mise à jour quotidienne du réseau TGVmax
 
-# SNCF Open Data -> GTFS -> network.bin.gz -> tests Go -> commit (Render redéploie automatiquement).
+# SNCF Open Data -> GTFS -> network.bin.gz -> tests Go -> Release GitHub « network-latest ».
+# L'API sur Render recharge le réseau à chaud depuis la Release : aucun build Render, aucun commit.
 on:
   schedule:
     # Tous les jours à 5h15 UTC (le jeu de données SNCF est rafraîchi dans la nuit)
@@ -60,10 +61,28 @@ jobs:
           build_report.json
         retention-days: 7
 
-    - name: Commit et push (Render redéploie automatiquement)
+    # URL fixe lue par l'API : https://github.com/<dépôt>/releases/download/network-latest/network.bin.gz
+    - name: Publier le réseau dans la Release network-latest
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        git add network.bin.gz build_report.json
-        git commit -m "Auto-update: réseau TGVmax du $(date -u +%Y-%m-%d)" || exit 0
-        git push
+        TAG=network-latest
+        NOTES="Réseau TGVmax compilé le $(date -u +%Y-%m-%dT%H:%M:%SZ) (run ${{ github.run_id }}). Mis à jour automatiquement chaque jour : ne pas supprimer."
+        if ! gh release view "$TAG" >/dev/null 2>&1; then
+          gh release create "$TAG" --title "Réseau TGVmax (dernière version)" --notes "$NOTES" --latest=false
+        fi
+        gh release upload "$TAG" network.bin.gz build_report.json --clobber
+        gh release edit "$TAG" --notes "$NOTES"
+
+    # Facultatif : sans ces secrets, l'API vérifie d'elle-même toutes les heures (et à chaque réveil).
+    - name: Demander à l'API de recharger le réseau
+      env:
+        API_URL: ${{ secrets.TGVMAX_API_URL }}
+        RELOAD_TOKEN: ${{ secrets.RELOAD_TOKEN }}
+      run: |
+        if [ -z "$API_URL" ] || [ -z "$RELOAD_TOKEN" ]; then
+          echo "Secrets TGVMAX_API_URL / RELOAD_TOKEN absents : l'API se mettra à jour seule."
+          exit 0
+        fi
+        # Une instance gratuite endormie met jusqu'à ~1 min à se réveiller.
+        curl -fsS --retry 5 --retry-delay 15 --retry-all-errors --max-time 120 -X POST -H "Authorization: Bearer $RELOAD_TOKEN" "${API_URL%/}/reload"
