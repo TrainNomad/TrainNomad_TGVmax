@@ -36,7 +36,7 @@ type App struct {
 	started time.Time
 
 	url    string        // vide = pas de rechargement (local)
-	every  time.Duration // intervalle de vérification
+	every  time.Duration // vérification périodique (0 = aucune : seulement au démarrage et sur POST /reload)
 	token  string        // RELOAD_TOKEN : protège POST /reload (vide = route désactivée)
 	client *http.Client
 
@@ -143,8 +143,8 @@ func (a *App) fetch(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// watch vérifie périodiquement la Release (une instance Render gratuite endormie ne vérifie pas,
-// mais retélécharge le réseau à son réveil).
+// watch vérifie périodiquement la Release (facultatif, NETWORK_REFRESH). Une instance Render gratuite
+// endormie retélécharge de toute façon le réseau à son réveil.
 func (a *App) watch() {
 	for {
 		time.Sleep(a.every)
@@ -192,7 +192,10 @@ func (a *App) status() map[string]any {
 	}
 	if a.url != "" {
 		out["url"] = a.url
-		out["refresh_every"] = a.every.String()
+		out["reload_endpoint"] = a.token != ""
+		if a.every > 0 {
+			out["refresh_every"] = a.every.String()
+		}
 		if !a.lastCheck.IsZero() {
 			out["last_check"] = fmtTime(a.lastCheck)
 		}

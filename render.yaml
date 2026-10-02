@@ -14,11 +14,10 @@ services:
         - Dockerfile
         - render.yaml
     envVars:
-      # Réseau téléchargé au démarrage puis vérifié toutes les NETWORK_REFRESH (repli : network.bin.gz de l'image).
+      # Réseau téléchargé au démarrage (repli : network.bin.gz de l'image), puis à chaque POST /reload.
       - key: NETWORK_URL
         value: https://github.com/TrainNomad/TrainNomad_TGVmax/releases/download/network-latest/network.bin.gz
-      - key: NETWORK_REFRESH
-        value: 1h
-      # Active POST /reload (appelé par la GitHub Action). Même valeur que le secret GitHub RELOAD_TOKEN.
+      # Active POST /reload, appelé par la GitHub Action après chaque publication. Même valeur que le secret
+      # GitHub RELOAD_TOKEN. Sans lui, le réseau n'est rechargé qu'au redémarrage (réveil) de l'instance.
       - key: RELOAD_TOKEN
         sync: false

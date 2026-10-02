@@ -29,10 +29,10 @@ func main() {
 	app := &App{
 		started: time.Now(),
 		url:     os.Getenv("NETWORK_URL"), // Release GitHub ; vide = fichier local uniquement
-		every:   time.Hour,
 		token:   os.Getenv("RELOAD_TOKEN"),
 		client:  &http.Client{Timeout: 2 * time.Minute},
 	}
+	// Vérification périodique facultative : par défaut, l'API est prévenue par POST /reload (GitHub Action).
 	if v := os.Getenv("NETWORK_REFRESH"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d >= time.Minute {
 			app.every = d
@@ -61,9 +61,12 @@ func main() {
 		}
 		app.publish(st)
 	}
-	if app.url != "" {
+	if app.url != "" && app.every > 0 {
 		go app.watch()
-		log.Printf("rechargement à chaud depuis %s toutes les %s", app.url, app.every)
+		log.Printf("vérification de %s toutes les %s", app.url, app.every)
+	}
+	if app.url != "" && app.token == "" {
+		log.Printf("RELOAD_TOKEN absent : POST /reload désactivé, le réseau ne sera rechargé qu'au redémarrage")
 	}
 
 	port := os.Getenv("PORT")

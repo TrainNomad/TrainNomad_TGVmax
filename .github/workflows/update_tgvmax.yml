@@ -1,12 +1,21 @@
-name: Mise à jour quotidienne du réseau TGVmax
+name: Mise à jour du réseau TGVmax
 
 # SNCF Open Data -> GTFS -> network.bin.gz -> tests Go -> Release GitHub « network-latest ».
 # L'API sur Render recharge le réseau à chaud depuis la Release : aucun build Render, aucun commit.
 on:
   schedule:
-    # Tous les jours à 5h15 UTC (le jeu de données SNCF est rafraîchi dans la nuit)
-    - cron: '15 5 * * *'
+    # SNCF met à jour le jeu de données vers 6h20 (heure de Paris), parfois plus tard.
+    # Vérification toutes les 10 min de 6h à 8h, heure d'été comme d'hiver (le cron est en UTC) :
+    # un passage ne fait qu'interroger la date de mise à jour SNCF (~10 s), le build n'a lieu que si elle a changé.
+    - cron: '3-53/10 4-6 * * *'
+    # Rattrapage si SNCF publie en retard.
+    - cron: '17 9,12,16 * * *'
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Reconstruire même si les données SNCF n'ont pas changé"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -15,8 +24,40 @@ concurrency:
   group: update-tgvmax
   cancel-in-progress: false
 
+env:
+  RELEASE_TAG: network-latest
+  SNCF_META_URL: https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/tgvmax
+
 jobs:
+  # Compare la date de mise à jour SNCF à celle du réseau publié (source_version.txt dans la Release).
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.cmp.outputs.changed }}
+      version: ${{ steps.cmp.outputs.version }}
+    steps:
+    - id: cmp
+      run: |
+        VERSION=$(curl -fsS --retry 3 --max-time 30 "$SNCF_META_URL" | jq -r '.metas.default.data_processed // empty') || true
+        PUBLISHED=$(curl -fsSL --max-time 30 "https://github.com/${{ github.repository }}/releases/download/$RELEASE_TAG/source_version.txt" 2>/dev/null || true)
+        echo "SNCF : ${VERSION:-inconnue} / publié : ${PUBLISHED:-aucun}"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+        elif [ -z "$VERSION" ]; then
+          echo "::warning::Date de mise à jour SNCF illisible, nouvel essai au prochain passage"
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+        elif [ "$VERSION" != "$PUBLISHED" ]; then
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "Données SNCF inchangées, rien à faire."
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+        fi
+
   build-and-update:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -66,22 +107,26 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-        TAG=network-latest
-        NOTES="Réseau TGVmax compilé le $(date -u +%Y-%m-%dT%H:%M:%SZ) (run ${{ github.run_id }}). Mis à jour automatiquement chaque jour : ne pas supprimer."
+        TAG=$RELEASE_TAG
+        printf '%s' "${{ needs.check.outputs.version }}" > source_version.txt
+        NOTES="Réseau TGVmax compilé le $(date -u +%Y-%m-%dT%H:%M:%SZ) à partir des données SNCF du ${{ needs.check.outputs.version }} (run ${{ github.run_id }}). Mis à jour automatiquement chaque jour : ne pas supprimer."
         if ! gh release view "$TAG" >/dev/null 2>&1; then
           gh release create "$TAG" --title "Réseau TGVmax (dernière version)" --notes "$NOTES" --latest=false
         fi
         gh release upload "$TAG" network.bin.gz build_report.json --clobber
+        # En dernier : marque cette version SNCF comme publiée (les passages suivants ne rebuildent plus).
+        gh release upload "$TAG" source_version.txt --clobber
         gh release edit "$TAG" --notes "$NOTES"
 
-    # Facultatif : sans ces secrets, l'API vérifie d'elle-même toutes les heures (et à chaque réveil).
+    # L'API ne vérifie pas d'elle-même : c'est cet appel qui lui fait charger le nouveau réseau
+    # (une instance endormie se réveille et télécharge de toute façon la dernière version).
     - name: Demander à l'API de recharger le réseau
       env:
         API_URL: ${{ secrets.TGVMAX_API_URL }}
         RELOAD_TOKEN: ${{ secrets.RELOAD_TOKEN }}
       run: |
         if [ -z "$API_URL" ] || [ -z "$RELOAD_TOKEN" ]; then
-          echo "Secrets TGVMAX_API_URL / RELOAD_TOKEN absents : l'API se mettra à jour seule."
+          echo "::warning::Secrets TGVMAX_API_URL / RELOAD_TOKEN absents : l'API ne chargera le nouveau réseau qu'à son prochain réveil."
           exit 0
         fi
         # Une instance gratuite endormie met jusqu'à ~1 min à se réveiller.

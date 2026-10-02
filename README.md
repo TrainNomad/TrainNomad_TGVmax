@@ -31,11 +31,11 @@ Les données ne passent plus par un commit : l'Action publie `network.bin.gz` da
 
 - **Au démarrage** (et donc à chaque réveil d'une instance endormie) : téléchargement de `NETWORK_URL`,
   repli sur le `network.bin.gz` de l'image si GitHub ne répond pas.
-- **Toutes les `NETWORK_REFRESH`** (1h par défaut) : nouvelle vérification (ETag + sha256). Le nouveau réseau
-  est compilé et vérifié à côté de l'ancien, puis échangé atomiquement ; un fichier invalide ou plus ancien est
-  ignoré et l'API continue sur le réseau actuel.
-- **`POST /reload`** (`Authorization: Bearer $RELOAD_TOKEN`) : rechargement immédiat, appelé par l'Action si les
-  secrets GitHub `TGVMAX_API_URL` et `RELOAD_TOKEN` sont définis. Route désactivée si `RELOAD_TOKEN` est vide.
+- **`POST /reload`** (`Authorization: Bearer $RELOAD_TOKEN`) : appelé par l'Action juste après la publication
+  (secrets GitHub `TGVMAX_API_URL` et `RELOAD_TOKEN`). Le nouveau réseau est compilé et vérifié à côté de l'ancien,
+  puis échangé atomiquement ; un fichier invalide ou plus ancien est ignoré et l'API garde le réseau actuel.
+  Route désactivée si `RELOAD_TOKEN` est vide.
+- Pas de vérification périodique par défaut (`NETWORK_REFRESH=30m` par exemple pour en activer une).
 - `GET /health` → `network` : source (`url` ou `file:…`), sha256, `loaded_at`, `last_check`, `last_error`.
 
 En local, sans `NETWORK_URL`, l'API lit simplement le fichier comme avant.
